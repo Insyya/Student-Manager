@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+backend/.env
+.env
+.env.local
+.env.*.local
+.neon/
+.neon
+node_modules/
+.env.local
