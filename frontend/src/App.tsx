@@ -1,18 +1,198 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  api,
-  type RankingEntry,
-  type Statistics,
-  type SearchResult,
-  type Student,
-  type User,
-} from "./api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, type RankingEntry, type Statistics, type User } from "./api";
 import AuthPage from "./AuthPage";
+import { Alert, Field, Icon, Modal, Spinner } from "./ui";
 import "./App.css";
 
-type FormErrors = { name?: string; marks?: string };
+const PASS_MARK = 40;
 
-type EditForm = { name: string; marks: number; originalName: string; originalMarks: number };
+type StudentDraft = { name: string; marks: string };
+type DraftErrors = { name?: string; marks?: string };
+type EditTarget = { name: string; marks: number } | null;
+
+function validateStudent(
+  draft: StudentDraft,
+  existingNames: string[],
+  original: EditTarget,
+): DraftErrors {
+  const errors: DraftErrors = {};
+  const name = draft.name.trim();
+  if (!name) errors.name = "Name is required";
+  else if (name.length > 100) errors.name = "Name must be 100 characters or fewer";
+  else if (name !== original?.name && existingNames.includes(name)) {
+    errors.name = "A student with this name already exists";
+  }
+
+  const raw = draft.marks.trim();
+  const marks = Number(raw);
+  if (raw === "") errors.marks = "Marks are required";
+  else if (!Number.isFinite(marks)) errors.marks = "Marks must be a number";
+  else if (!Number.isInteger(marks)) errors.marks = "Marks must be a whole number";
+  else if (marks < 0 || marks > 100) errors.marks = "Marks must be between 0 and 100";
+  return errors;
+}
+
+function gradeTone(grade: string) {
+  if (grade === "A+" || grade === "A") return "success";
+  if (grade === "B" || grade === "C") return "info";
+  if (grade === "D" || grade === "E") return "warning";
+  return "danger";
+}
+
+/* ---------- Add / edit modal ---------- */
+
+type StudentModalProps = {
+  target: EditTarget;
+  existingNames: string[];
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+};
+
+function StudentModal({ target, existingNames, onClose, onSaved }: StudentModalProps) {
+  const isEdit = target !== null;
+  const [draft, setDraft] = useState<StudentDraft>({
+    name: target?.name ?? "",
+    marks: target ? String(target.marks) : "",
+  });
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [submitted, setSubmitted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  const errors = validateStudent(draft, existingNames, target);
+  const show = (f: keyof DraftErrors) => (submitted || touched[f] ? errors[f] : undefined);
+  const name = draft.name.trim();
+  const marks = Number(draft.marks);
+  const unchanged = isEdit && name === target.name && marks === target.marks;
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setSubmitted(true);
+    setServerError(null);
+    if (Object.keys(errors).length > 0 || unchanged) return;
+
+    setBusy(true);
+    try {
+      if (!isEdit) {
+        await api.addStudent(name, marks);
+        await onSaved(`${name} was added`);
+      } else {
+        if (name !== target.name) await api.updateName(target.name, name);
+        if (marks !== target.marks) await api.updateMarks(name, target.marks, marks);
+        await onSaved(`${name} was updated`);
+      }
+      onClose();
+    } catch (err) {
+      setServerError(err instanceof Error ? err.message : "Could not save the student");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={isEdit ? "Edit student" : "Add student"}
+      description={isEdit ? "Update the name or marks." : "Enter the student's name and marks out of 100."}
+      onClose={onClose}
+      busy={busy}
+    >
+      <form onSubmit={handleSubmit} noValidate>
+        <div className="modal-body">
+          {serverError && <Alert>{serverError}</Alert>}
+          <Field
+            label="Full name"
+            placeholder="e.g. Ayesha Khan"
+            value={draft.name}
+            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            onBlur={() => setTouched((t) => ({ ...t, name: true }))}
+            error={show("name")}
+            maxLength={100}
+            autoComplete="off"
+            disabled={busy}
+            required
+          />
+          <Field
+            label="Marks"
+            type="number"
+            inputMode="numeric"
+            placeholder="0 – 100"
+            value={draft.marks}
+            onChange={(e) => setDraft({ ...draft, marks: e.target.value })}
+            onBlur={() => setTouched((t) => ({ ...t, marks: true }))}
+            error={show("marks")}
+            hint={`Pass mark is ${PASS_MARK}.`}
+            min={0}
+            max={100}
+            step={1}
+            disabled={busy}
+            required
+          />
+          {submitted && unchanged && Object.keys(errors).length === 0 && (
+            <p className="field-hint">No changes to save.</p>
+          )}
+        </div>
+        <footer className="modal-footer">
+          <button type="button" className="btn btn-secondary" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy && <Spinner />}
+            {busy ? "Saving…" : isEdit ? "Save changes" : "Add student"}
+          </button>
+        </footer>
+      </form>
+    </Modal>
+  );
+}
+
+/* ---------- Delete modal ---------- */
+
+function DeleteModal({
+  name,
+  onClose,
+  onDeleted,
+}: {
+  name: string;
+  onClose: () => void;
+  onDeleted: (message: string) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  async function handleDelete() {
+    setBusy(true);
+    setServerError(null);
+    try {
+      await api.deleteStudent(name);
+      await onDeleted(`${name} was deleted`);
+      onClose();
+    } catch (err) {
+      setServerError(err instanceof Error ? err.message : "Could not delete the student");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Delete student?" onClose={onClose} busy={busy}>
+      <div className="modal-body">
+        {serverError && <Alert>{serverError}</Alert>}
+        <p className="modal-text">
+          <strong>{name}</strong> and their marks will be permanently removed. This can't be undone.
+        </p>
+      </div>
+      <footer className="modal-footer">
+        <button type="button" className="btn btn-secondary" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-danger" onClick={handleDelete} disabled={busy}>
+          {busy && <Spinner />}
+          {busy ? "Deleting…" : "Delete"}
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
+/* ---------- App ---------- */
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -21,53 +201,34 @@ function App() {
   const [statistics, setStatistics] = useState<Statistics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [modal, setModal] = useState<
+    { kind: "add" } | { kind: "edit"; student: RankingEntry } | { kind: "delete"; name: string } | null
+  >(null);
+  const [toast, setToast] = useState<string | null>(null);
 
-  // Search
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
-  const [searchLoading, setSearchLoading] = useState(false);
-
-  // Add student modal
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [addName, setAddName] = useState("");
-  const [addMarks, setAddMarks] = useState("");
-  const [addErrors, setAddErrors] = useState<FormErrors>({});
-  const [addLoading, setAddLoading] = useState(false);
-
-  // Edit student modal
-  const [editForm, setEditForm] = useState<EditForm | null>(null);
-  const [editErrors, setEditErrors] = useState<FormErrors>({});
-  const [editLoading, setEditLoading] = useState(false);
-
-  // Delete confirmation modal
-  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  const [deleteLoading, setDeleteLoading] = useState(false);
-
-  // Focus management for modals
-  const addModalRef = useRef<HTMLDivElement>(null);
-  const editModalRef = useRef<HTMLDivElement>(null);
-  const deleteModalRef = useRef<HTMLDivElement>(null);
-
-  const loadData = useCallback(async (activeSearch: string | null = null) => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [rankingData, statsData, searchData] = await Promise.all([
-        api.getRanking(),
-        api.getStatistics(),
-        activeSearch ? api.searchStudents(activeSearch) : Promise.resolve(null),
-      ]);
-      setStudents(rankingData);
-      setStatistics(statsData);
-      setSearchResults(searchData);
+      const [ranking, stats] = await Promise.all([api.getRanking(), api.getStatistics()]);
+      setStudents(ranking);
+      setStatistics(stats);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load data");
+      setError(err instanceof Error ? err.message : "Failed to load students");
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Restore the signed-in user before requesting private student data.
+  const resetSession = useCallback(() => {
+    setUser(null);
+    setStudents([]);
+    setStatistics(null);
+    setQuery("");
+    setModal(null);
+  }, []);
+
   useEffect(() => {
     let active = true;
     api.getCurrentUser()
@@ -76,372 +237,202 @@ function App() {
         setUser(currentUser);
         if (currentUser) void loadData();
       })
-      .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : "Could not restore session");
-      })
-      .finally(() => {
-        if (active) setAuthLoading(false);
-      });
-    const handleExpiredSession = () => {
-      setUser(null);
-      setStudents([]);
-      setStatistics(null);
-      setSearchResults(null);
-    };
-    window.addEventListener("auth-expired", handleExpiredSession);
+      .catch(() => undefined)
+      .finally(() => active && setAuthLoading(false));
+    window.addEventListener("auth-expired", resetSession);
     return () => {
       active = false;
-      window.removeEventListener("auth-expired", handleExpiredSession);
+      window.removeEventListener("auth-expired", resetSession);
     };
-  }, [loadData]);
+  }, [loadData, resetSession]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  async function handleSaved(message: string) {
+    await loadData();
+    setToast(message);
+  }
 
   async function handleLogout() {
-    setError(null);
     try {
       await api.logout();
-      setUser(null);
-      setStudents([]);
-      setStatistics(null);
-      setSearchResults(null);
+      resetSession();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not sign out");
     }
   }
 
-  // Search handler
-  async function handleSearch() {
-    const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults(null);
-      return;
-    }
-    setSearchLoading(true);
-    try {
-      const results = await api.searchStudents(query);
-      setSearchResults(results);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Search failed");
-    } finally {
-      setSearchLoading(false);
-    }
-  }
-
-  function clearSearch() {
-    setSearchQuery("");
-    setSearchResults(null);
-  }
-
-  // Add student validation
-  function validateAddForm(): boolean {
-    const errors: FormErrors = {};
-    const name = addName.trim();
-    const marks = Number(addMarks);
-
-    if (!name) errors.name = "Name is required";
-    else if (name.length > 100) errors.name = "Name is too long (max 100 characters)";
-
-    if (addMarks === "") errors.marks = "Marks are required";
-    else if (Number.isNaN(marks)) errors.marks = "Marks must be a number";
-    else if (!Number.isInteger(marks)) errors.marks = "Marks must be a whole number";
-    else if (marks < 0 || marks > 100) errors.marks = "Marks must be between 0 and 100";
-
-    setAddErrors(errors);
-    return Object.keys(errors).length === 0;
-  }
-
-  async function handleAddStudent(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!validateAddForm()) return;
-
-    setAddLoading(true);
-    setError(null);
-    try {
-      await api.addStudent(addName.trim(), Number(addMarks));
-      setShowAddModal(false);
-      setAddName("");
-      setAddMarks("");
-      await loadData(searchResults === null ? null : searchQuery.trim() || null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add student");
-    } finally {
-      setAddLoading(false);
-    }
-  }
-
-  // Edit student
-  function openEditModal(student: Pick<Student, "name" | "marks">) {
-    setEditForm({
-      name: student.name,
-      marks: student.marks,
-      originalName: student.name,
-      originalMarks: student.marks,
-    });
-    setEditErrors({});
-  }
-
-  function closeEditModal() {
-    setEditForm(null);
-    setEditErrors({});
-  }
-
-  function validateEditForm(): boolean {
-    if (!editForm) return false;
-    const errors: FormErrors = {};
-    const name = editForm.name.trim();
-    const marks = editForm.marks;
-
-    if (!name) errors.name = "Name is required";
-    else if (name.length > 100) errors.name = "Name is too long (max 100 characters)";
-
-    if (!Number.isInteger(marks)) errors.marks = "Marks must be a whole number";
-    else if (marks < 0 || marks > 100) errors.marks = "Marks must be between 0 and 100";
-    else if (marks === editForm.originalMarks && name === editForm.originalName) {
-      errors.marks = "No changes detected";
-    }
-
-    setEditErrors(errors);
-    return Object.keys(errors).length === 0;
-  }
-
-  async function handleEditStudent(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!editForm || !validateEditForm()) return;
-
-    setEditLoading(true);
-    setError(null);
-    try {
-      const newName = editForm.name.trim();
-      const nameChanged = newName !== editForm.originalName;
-      const marksChanged = editForm.marks !== editForm.originalMarks;
-
-      if (nameChanged) {
-        await api.updateName(editForm.originalName, newName);
-      }
-      if (marksChanged) {
-        await api.updateMarks(
-          nameChanged ? newName : editForm.originalName,
-          editForm.originalMarks,
-          editForm.marks,
-        );
-      }
-      closeEditModal();
-      await loadData(searchResults === null ? null : searchQuery.trim() || null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update student");
-    } finally {
-      setEditLoading(false);
-    }
-  }
-
-  // Delete student
-  function openDeleteConfirm(name: string) {
-    setDeleteConfirm(name);
-  }
-
-  function closeDeleteConfirm() {
-    setDeleteConfirm(null);
-  }
-
-  async function handleDeleteStudent() {
-    if (!deleteConfirm) return;
-    setDeleteLoading(true);
-    setError(null);
-    try {
-      await api.deleteStudent(deleteConfirm);
-      closeDeleteConfirm();
-      await loadData(searchResults === null ? null : searchQuery.trim() || null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete student");
-    } finally {
-      setDeleteLoading(false);
-    }
-  }
-
-  // Trap focus in modal
-  function trapFocus(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (e.key === "Tab") {
-      const modal = e.currentTarget;
-      const focusable = modal.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-    if (e.key === "Escape") {
-      setShowAddModal(false);
-      closeEditModal();
-      closeDeleteConfirm();
-    }
-  }
-
-  const rankingByName = new Map(students.map(({ name, rank }) => [name, rank]));
-  const displayedStudents: Array<SearchResult & { rank?: number }> = searchResults
-    ? searchResults.map((student) => ({
-        ...student,
-        rank: rankingByName.get(student.name),
-      }))
-    : students;
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? students.filter((s) => s.name.toLowerCase().includes(q)) : students;
+  }, [students, query]);
 
   if (authLoading) {
     return (
-      <main className="auth-page">
-        <p className="loading" role="status">Checking your session...</p>
-      </main>
+      <div className="page-center">
+        <Spinner /> <span>Loading…</span>
+      </div>
     );
   }
 
   if (!user) {
-    return <AuthPage onAuthenticated={(authenticatedUser) => {
-      setUser(authenticatedUser);
-      void loadData();
-    }} />;
+    return (
+      <AuthPage
+        onAuthenticated={(u) => {
+          setUser(u);
+          void loadData();
+        }}
+      />
+    );
   }
+
+  const total = statistics?.total_students ?? 0;
+  const passRate = total ? Math.round(((statistics?.passed_students ?? 0) / total) * 100) : 0;
+
+  const stats = [
+    { label: "Total students", value: total, icon: <Icon.Users />, tone: "accent" },
+    { label: "Average marks", value: total ? (statistics?.average_marks ?? 0).toFixed(1) : "–", icon: <Icon.Chart />, tone: "info" },
+    { label: "Pass rate", value: total ? `${passRate}%` : "–", sub: total ? `${statistics?.passed_students} passed · ${statistics?.failed_students} failed` : undefined, icon: <Icon.Badge />, tone: "success" },
+    { label: "Top score", value: statistics?.highest_marks ?? "–", icon: <Icon.Trophy />, tone: "warning" },
+  ];
 
   return (
     <div className="app">
-      <header className="header">
-        <div>
-          <h1>Student Manager</h1>
-          <p>Manage student results easily</p>
-        </div>
-        <div className="header-actions">
-          <span className="signed-in-user">{user.email}</span>
-          <button className="secondary-button" onClick={handleLogout}>Sign out</button>
-          <button
-            className="add-button"
-            onClick={() => setShowAddModal(true)}
-            aria-label="Add new student"
-          >
-            + Add Student
-          </button>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <div className="brand">
+            <span className="brand-mark"><Icon.Logo /></span>
+            Student Manager
+          </div>
+          <div className="topbar-user">
+            <span className="avatar" aria-hidden="true">{user.email[0].toUpperCase()}</span>
+            <span className="topbar-email">{user.email}</span>
+            <button className="btn btn-ghost btn-sm" onClick={handleLogout}>
+              <Icon.Logout /> <span className="hide-sm">Sign out</span>
+            </button>
+          </div>
         </div>
       </header>
 
-      {error && (
-        <div className="error-banner" role="alert">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} aria-label="Dismiss error">✕</button>
+      <main className="container">
+        <div className="page-head">
+          <div>
+            <h1>Students</h1>
+            <p>Manage your class results, grades and rankings.</p>
+          </div>
+          <button className="btn btn-primary" onClick={() => setModal({ kind: "add" })}>
+            <Icon.Plus /> Add student
+          </button>
         </div>
-      )}
 
-      <main className="main">
-        {/* Statistics */}
-        <section className="stats" aria-label="Statistics">
-          <div className="stat-card">
-            <span>Total Students</span>
-            <strong>{statistics?.total_students ?? 0}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Average Marks</span>
-            <strong>{(statistics?.average_marks ?? 0).toFixed(2)}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Passed</span>
-            <strong>{statistics?.passed_students ?? 0}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Failed</span>
-            <strong>{statistics?.failed_students ?? 0}</strong>
-          </div>
+        {error && <Alert onClose={() => setError(null)}>{error}</Alert>}
+
+        <section className="stats" aria-label="Class statistics">
+          {stats.map((s) => (
+            <div className="stat" key={s.label}>
+              <span className={`stat-icon tone-${s.tone}`}>{s.icon}</span>
+              <div>
+                <p className="stat-label">{s.label}</p>
+                <p className="stat-value">{s.value}</p>
+                {s.sub && <p className="stat-sub">{s.sub}</p>}
+              </div>
+            </div>
+          ))}
         </section>
 
-        {/* Students */}
-        <section className="students-section">
-          <div className="section-header">
-            <div>
-              <h2>Students</h2>
-              <p>All registered students and their results</p>
-            </div>
-            <div className="search-group">
+        <section className="card">
+          <div className="card-toolbar">
+            <div className="search">
+              <Icon.Search />
               <input
-                className="search-input"
-                type="text"
-                placeholder="Search students..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                type="search"
+                placeholder="Search by name"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
                 aria-label="Search students by name"
-                disabled={searchLoading}
               />
-              <button
-                className="search-button"
-                onClick={handleSearch}
-                disabled={searchLoading}
-                aria-label={searchLoading ? "Searching..." : "Search"}
-              >
-                {searchLoading ? "Searching..." : "Search"}
-              </button>
-              {searchQuery && (
-                <button
-                  className="clear-button"
-                  onClick={clearSearch}
-                  aria-label="Clear search"
-                >
-                  Clear
+              {query && (
+                <button className="icon-button" onClick={() => setQuery("")} aria-label="Clear search">
+                  <Icon.X size={14} />
                 </button>
               )}
             </div>
+            <span className="muted">
+              {query ? `${filtered.length} of ${students.length}` : `${students.length}`} student
+              {students.length === 1 ? "" : "s"}
+            </span>
           </div>
 
           {loading ? (
-            <div className="loading" aria-live="polite">
-              <span className="spinner" aria-hidden="true"></span>
-              Loading students...
-            </div>
-          ) : displayedStudents.length === 0 ? (
+            <div className="empty"><Spinner /> Loading students…</div>
+          ) : students.length === 0 ? (
             <div className="empty">
-              {searchQuery ? "No matching students found." : "No students found. Click \"Add Student\" to get started."}
+              <span className="empty-icon"><Icon.Users size={22} /></span>
+              <h3>No students yet</h3>
+              <p>Add your first student to see grades, ranking and statistics.</p>
+              <button className="btn btn-primary" onClick={() => setModal({ kind: "add" })}>
+                <Icon.Plus /> Add student
+              </button>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="empty">
+              <h3>No matches</h3>
+              <p>No student name contains “{query.trim()}”.</p>
             </div>
           ) : (
-            <div className="table-container">
+            <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th scope="col">Rank</th>
+                    <th scope="col" className="col-rank">#</th>
                     <th scope="col">Name</th>
                     <th scope="col">Marks</th>
                     <th scope="col">Grade</th>
                     <th scope="col">Status</th>
-                    <th scope="col">Actions</th>
+                    <th scope="col" className="col-actions"><span className="sr-only">Actions</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {displayedStudents.map((student) => {
-                    const passed = student.marks >= 40;
+                  {filtered.map((s) => {
+                    const passed = s.marks >= PASS_MARK;
                     return (
-                      <tr key={student.name}>
-                        <td>{student.rank ?? "—"}</td>
-                        <td className="student-name">{student.name}</td>
-                        <td>{student.marks}</td>
+                      <tr key={s.name}>
+                        <td className="col-rank">{s.rank}</td>
+                        <td className="cell-name">{s.name}</td>
                         <td>
-                          <span className="grade">{student.grade}</span>
+                          <div className="marks">
+                            <span className="marks-value">{s.marks}</span>
+                            <span className="marks-bar" aria-hidden="true">
+                              <span className={passed ? "pass" : "fail"} style={{ width: `${s.marks}%` }} />
+                            </span>
+                          </div>
                         </td>
+                        <td><span className={`badge tone-${gradeTone(s.grade)}`}>{s.grade}</span></td>
                         <td>
-                          <span className={passed ? "passed" : "failed"}>
+                          <span className={`status ${passed ? "status-pass" : "status-fail"}`}>
                             {passed ? "Passed" : "Failed"}
                           </span>
                         </td>
-                        <td>
+                        <td className="col-actions">
                           <button
-                            className="action-button"
-                            onClick={() => openEditModal(student)}
-                            aria-label={`Edit ${student.name}`}
+                            className="icon-button"
+                            onClick={() => setModal({ kind: "edit", student: s })}
+                            aria-label={`Edit ${s.name}`}
+                            title="Edit"
                           >
-                            Edit
+                            <Icon.Edit />
                           </button>
                           <button
-                            className="delete-button"
-                            onClick={() => openDeleteConfirm(student.name)}
-                            aria-label={`Delete ${student.name}`}
+                            className="icon-button icon-danger"
+                            onClick={() => setModal({ kind: "delete", name: s.name })}
+                            aria-label={`Delete ${s.name}`}
+                            title="Delete"
                           >
-                            Delete
+                            <Icon.Trash />
                           </button>
                         </td>
                       </tr>
@@ -454,235 +445,21 @@ function App() {
         </section>
       </main>
 
-      {/* Add Student Modal */}
-      {showAddModal && (
-        <div
-          className="modal-overlay"
-          onClick={() => setShowAddModal(false)}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="add-modal-title"
-        >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={trapFocus}
-            ref={addModalRef}
-          >
-            <header className="modal-header">
-              <h2 id="add-modal-title">Add Student</h2>
-              <button
-                className="modal-close"
-                onClick={() => setShowAddModal(false)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </header>
-            <form onSubmit={handleAddStudent} noValidate>
-              <div className="form-group">
-                <label htmlFor="add-name">Name <span className="required" aria-hidden="true">*</span></label>
-                <input
-                  id="add-name"
-                  type="text"
-                  value={addName}
-                  onChange={(e) => setAddName(e.target.value)}
-                  onBlur={() => validateAddForm()}
-                  placeholder="Enter student name"
-                  maxLength={100}
-                  autoFocus
-                  disabled={addLoading}
-                  aria-invalid={!!addErrors.name}
-                  aria-describedby={addErrors.name ? "add-name-error" : undefined}
-                />
-                {addErrors.name && (
-                  <span id="add-name-error" className="error-text" role="alert">
-                    {addErrors.name}
-                  </span>
-                )}
-              </div>
-              <div className="form-group">
-                <label htmlFor="add-marks">Marks <span className="required" aria-hidden="true">*</span></label>
-                <input
-                  id="add-marks"
-                  type="number"
-                  value={addMarks}
-                  onChange={(e) => setAddMarks(e.target.value)}
-                  onBlur={() => validateAddForm()}
-                  placeholder="Enter marks (0-100)"
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={addLoading}
-                  aria-invalid={!!addErrors.marks}
-                  aria-describedby={addErrors.marks ? "add-marks-error" : undefined}
-                />
-                {addErrors.marks && (
-                  <span id="add-marks-error" className="error-text" role="alert">
-                    {addErrors.marks}
-                  </span>
-                )}
-              </div>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => setShowAddModal(false)}
-                  disabled={addLoading}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="primary-button"
-                  disabled={addLoading}
-                >
-                  {addLoading ? "Adding..." : "Add Student"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {(modal?.kind === "add" || modal?.kind === "edit") && (
+        <StudentModal
+          target={modal.kind === "edit" ? { name: modal.student.name, marks: modal.student.marks } : null}
+          existingNames={students.map((s) => s.name)}
+          onClose={() => setModal(null)}
+          onSaved={handleSaved}
+        />
+      )}
+      {modal?.kind === "delete" && (
+        <DeleteModal name={modal.name} onClose={() => setModal(null)} onDeleted={handleSaved} />
       )}
 
-      {/* Edit Student Modal */}
-      {editForm && (
-        <div
-          className="modal-overlay"
-          onClick={closeEditModal}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="edit-modal-title"
-        >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={trapFocus}
-            ref={editModalRef}
-          >
-            <header className="modal-header">
-              <h2 id="edit-modal-title">Edit Student</h2>
-              <button
-                className="modal-close"
-                onClick={closeEditModal}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </header>
-            <form onSubmit={handleEditStudent} noValidate>
-              <div className="form-group">
-                <label htmlFor="edit-name">Name <span className="required" aria-hidden="true">*</span></label>
-                <input
-                  id="edit-name"
-                  type="text"
-                  value={editForm.name}
-                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                  onBlur={() => validateEditForm()}
-                  placeholder="Enter student name"
-                  maxLength={100}
-                  autoFocus
-                  disabled={editLoading}
-                  aria-invalid={!!editErrors.name}
-                  aria-describedby={editErrors.name ? "edit-name-error" : undefined}
-                />
-                {editErrors.name && (
-                  <span id="edit-name-error" className="error-text" role="alert">
-                    {editErrors.name}
-                  </span>
-                )}
-              </div>
-              <div className="form-group">
-                <label htmlFor="edit-marks">Marks <span className="required" aria-hidden="true">*</span></label>
-                <input
-                  id="edit-marks"
-                  type="number"
-                  value={editForm.marks}
-                  onChange={(e) => setEditForm({ ...editForm, marks: Number(e.target.value) || 0 })}
-                  onBlur={() => validateEditForm()}
-                  placeholder="Enter marks (0-100)"
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={editLoading}
-                  aria-invalid={!!editErrors.marks}
-                  aria-describedby={editErrors.marks ? "edit-marks-error" : undefined}
-                />
-                {editErrors.marks && (
-                  <span id="edit-marks-error" className="error-text" role="alert">
-                    {editErrors.marks}
-                  </span>
-                )}
-              </div>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={closeEditModal}
-                  disabled={editLoading}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="primary-button"
-                  disabled={editLoading}
-                >
-                  {editLoading ? "Saving..." : "Save Changes"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Delete Confirmation Modal */}
-      {deleteConfirm && (
-        <div
-          className="modal-overlay"
-          onClick={closeDeleteConfirm}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="delete-modal-title"
-        >
-          <div
-            className="modal modal-danger"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={trapFocus}
-            ref={deleteModalRef}
-          >
-            <header className="modal-header">
-              <h2 id="delete-modal-title">Delete Student</h2>
-              <button
-                className="modal-close"
-                onClick={closeDeleteConfirm}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </header>
-            <p className="modal-message">
-              Are you sure you want to delete <strong>{deleteConfirm}</strong>? This action cannot be undone.
-            </p>
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={closeDeleteConfirm}
-                disabled={deleteLoading}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger-button"
-                onClick={handleDeleteStudent}
-                disabled={deleteLoading}
-              >
-                {deleteLoading ? "Deleting..." : "Delete"}
-              </button>
-            </div>
-          </div>
+      {toast && (
+        <div className="toast" role="status">
+          <Icon.Check /> {toast}
         </div>
       )}
     </div>
